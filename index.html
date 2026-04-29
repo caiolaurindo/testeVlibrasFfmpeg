@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Conversor Libras - Grupo 3</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #eee; }
+        .panel { background: white; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        .recording { color: red; animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+        #status { font-size: 0.9em; color: #666; margin-top: 5px; }
+    </style>
+</head>
+
+<body>
+    <div class="panel">
+        <input type="file" id="fileInput" accept=".srt">
+        <button onclick="carregar()">📁 Carregar SRT</button>
+        <button id="btnRec" onclick="iniciarProcesso()">⏺ Gerar e Gravar</button>
+        <a id="dl" style="display:none; margin-top: 10px; font-weight: bold; color: green;">⬇ Baixar Vídeo MP4</a>
+        <div id="status">Aguardando arquivo...</div>
+    </div>
+
+    <div vw class="enabled">
+        <div vw-access-button class="active"></div>
+        <div vw-plugin-wrapper>
+            <div class="vw-plugin-top-wrapper"></div>
+        </div>
+    </div>
+
+    <script src="https://vlibras.gov.br/app/vlibras-plugin.js"></script>
+    <script>
+        new window.VLibras.Widget('https://vlibras.gov.br/app');
+        
+        let glossas = []; 
+        let rec; 
+        let chunks = [];
+        let playTimeouts = [];
+
+        // Converte o formato SRT (00:00:00,000) para milissegundos
+        function srtToMs(srtTime) {
+            const [time, ms] = srtTime.replace(',', '.').split('.');
+            const [h, m, s] = time.split(':');
+            return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000 + (parseInt(ms) || 0);
+        }
+
+        async function carregar() {
+            const fileInput = document.getElementById('fileInput');
+            if (!fileInput.files[0]) return alert("Selecione um arquivo SRT primeiro.");
+            
+            const text = await fileInput.files[0].text();
+            document.getElementById('status').innerText = "Processando glossas...";
+            
+            try {
+                const res = await fetch('http://localhost:5000/processar', { method: 'POST', body: text });
+                glossas = await res.json();
+                document.getElementById('status').innerText = "Legendas carregadas e prontas!";
+            } catch (e) {
+                document.getElementById('status').innerText = "Erro ao conectar com o servidor Python.";
+            }
+        }
+
+        // Garante que o player está pronto e sinaliza no tempo certo
+        function playSincronizado() {
+            if (!window.plugin || !window.plugin.player || typeof window.plugin.player.translate !== 'function') {
+                document.getElementById('status').innerText = "Aguardando inicialização do avatar...";
+                setTimeout(playSincronizado, 1000);
+                return;
+            }
+
+            document.getElementById('status').innerText = "Sinalizando e gravando...";
+            const startTime = Date.now();
+
+            glossas.forEach((item) => {
+                const delay = srtToMs(item.start);
+                const timeout = setTimeout(() => {
+                    if (rec && rec.state === "recording") {
+                        window.plugin.player.translate(item.glossa);
+                    }
+                }, delay);
+                playTimeouts.push(timeout);
+            });
+
+            // Calcula o fim da gravação baseado no último timestamp
+            const totalDuration = srtToMs(glossas[glossas.length - 1].end) + 2000;
+            setTimeout(pararGravacao, totalDuration);
+        }
+
+        function iniciarProcesso() {
+            if (glossas.length === 0) return alert("Carregue o SRT antes de gerar.");
+            
+            const canvas = document.querySelector('canvas');
+            if (!canvas) return alert("O avatar ainda não carregou. Aguarde o boneco aparecer na tela.");
+
+            // Limpa estados anteriores
+            chunks = [];
+            playTimeouts.forEach(clearTimeout);
+            playTimeouts = [];
+
+            // Inicia captura do Canvas
+            const stream = canvas.captureStream(30);
+            rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            
+            rec.ondataavailable = e => chunks.push(e.data);
+            rec.onstop = enviarParaConversao;
+
+            rec.start();
+            document.getElementById('btnRec').classList.add('recording');
+            document.getElementById('dl').style.display = 'none';
+            
+            playSincronizado();
+        }
+
+        function pararGravacao() {
+            if (rec && rec.state === "recording") {
+                rec.stop();
+                document.getElementById('btnRec').classList.remove('recording');
+                document.getElementById('status').innerText = "Gravado! Convertendo para MP4...";
+            }
+        }
+
+        async function enviarParaConversao() {
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const fd = new FormData();
+            fd.append('video', blob);
+
+            try {
+                const res = await fetch('http://localhost:5000/converter', { method: 'POST', body: fd });
+                if (!res.ok) throw new Error("Falha na conversão");
+                
+                const mp4 = await res.blob();
+                const a = document.getElementById('dl');
+                a.href = URL.createObjectURL(mp4);
+                a.style.display = 'block';
+                document.getElementById('status').innerText = "Conversão concluída!";
+            } catch (e) {
+                document.getElementById('status').innerText = "Erro na conversão. Verifique se o FFmpeg está instalado.";
+            }
+        }
+    </script>
+</body>
+</html>
