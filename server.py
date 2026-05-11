@@ -1,37 +1,55 @@
+# =========================================================
+# serve.py
+# =========================================================
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import re
+
 import os
-import subprocess
+import re
+import time
+import requests
 import tempfile
 import shutil
-from datetime import datetime
+import subprocess
+import traceback
 
-app = Flask(__name__)
-CORS(app)
+from datetime import datetime
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-MEDIA_DIR = os.path.join(os.getcwd(), 'media')
+app = Flask(__name__)
+CORS(app)
+
+MEDIA_DIR = "media"
 
 if not os.path.exists(MEDIA_DIR):
     os.makedirs(MEDIA_DIR)
 
 # =========================================================
-# UTILIDADES
+# RUNWAY CONFIG
+# =========================================================
+
+RUNWAY_API_KEY = "key_76addf21d5598d6e3fbe6deba43e1aaeba41dc54574a040dd07d2ad96a68003c90fdcaf30c6d913932677d70cd97960518ca8294f1ac7a044b025317b5f7a2c6"
+
+RUNWAY_API_URL = "https://api.dev.runwayml.com/v1"
+
+HEADERS = {
+    "Authorization": f"Bearer {RUNWAY_API_KEY}",
+    "Content-Type": "application/json",
+    "X-Runway-Version": "2024-11-06"
+}
+
+# =========================================================
+# TIMESTAMP
 # =========================================================
 
 def timestamp_para_segundos(ts):
-    """
-    Converte:
-    00:00:02,500
-    para:
-    2.5
-    """
 
     h, m, s_ms = ts.split(':')
+
     s, ms = s_ms.split(',')
 
     return (
@@ -41,20 +59,8 @@ def timestamp_para_segundos(ts):
         int(ms) / 1000
     )
 
-def segundos_para_ffmpeg(segundos):
-    """
-    Converte segundos float para formato:
-    HH:MM:SS.mmm
-    """
-
-    horas = int(segundos // 3600)
-    minutos = int((segundos % 3600) // 60)
-    secs = segundos % 60
-
-    return f"{horas:02}:{minutos:02}:{secs:06.3f}"
-
 # =========================================================
-# PARSER SRT
+# PARSE SRT
 # =========================================================
 
 def parse_srt(text):
@@ -71,29 +77,52 @@ def parse_srt(text):
             continue
 
         try:
-            time_line = next(l for l in lines if '-->' in l)
+
+            time_line = next(
+                l for l in lines if '-->' in l
+            )
 
             times = time_line.split(' --> ')
 
-            text_start_idx = lines.index(time_line) + 1
+            text_start_idx = (
+                lines.index(time_line) + 1
+            )
 
-            original_text = ' '.join(lines[text_start_idx:]).strip()
+            original_text = ' '.join(
+                lines[text_start_idx:]
+            ).strip()
 
             start = times[0].strip()
             end = times[1].strip()
 
-            start_seconds = timestamp_para_segundos(start)
-            end_seconds = timestamp_para_segundos(end)
+            start_seconds = (
+                timestamp_para_segundos(start)
+            )
 
-            duration = end_seconds - start_seconds
+            end_seconds = (
+                timestamp_para_segundos(end)
+            )
+
+            duration = (
+                end_seconds - start_seconds
+            )
 
             entries.append({
-                'start': start,
-                'end': end,
-                'start_seconds': start_seconds,
-                'end_seconds': end_seconds,
-                'duration': duration,
-                'original': original_text
+
+                "start": start,
+                "end": end,
+
+                "start_seconds":
+                    start_seconds,
+
+                "end_seconds":
+                    end_seconds,
+
+                "duration":
+                    duration,
+
+                "original":
+                    original_text
             })
 
         except Exception:
@@ -102,23 +131,38 @@ def parse_srt(text):
     return entries
 
 # =========================================================
-# NORMALIZAÇÃO PARA GLOSSA
+# NORMALIZA
 # =========================================================
 
 def normalizar(texto):
 
-    ruidos = r'\b(hmm|hm|ux|chou|hein|né|ah|oh|uh|ai)\b'
+    ruidos = (
+        r'\b(hmm|hm|ux|chou|hein|né|ah|oh|uh|ai)\b'
+    )
 
-    texto = re.sub(ruidos, '', texto, flags=re.IGNORECASE)
+    texto = re.sub(
+        ruidos,
+        '',
+        texto,
+        flags=re.IGNORECASE
+    )
 
-    texto = re.sub(r'[^\w\s]', ' ', texto)
+    texto = re.sub(
+        r'[^\w\s]',
+        ' ',
+        texto
+    )
 
-    texto = re.sub(r'\s+', ' ', texto)
+    texto = re.sub(
+        r'\s+',
+        ' ',
+        texto
+    )
 
     return texto.strip().upper()
 
 # =========================================================
-# ENDPOINT PROCESSAR SRT
+# PROCESSAR SRT
 # =========================================================
 
 @app.route('/processar', methods=['POST'])
@@ -131,252 +175,409 @@ def processar():
         entries = parse_srt(text)
 
         for e in entries:
-            e['glossa'] = normalizar(e['original'])
+
+            e['glossa'] = normalizar(
+                e['original']
+            )
 
         return jsonify(entries)
 
     except Exception as e:
+
+        traceback.print_exc()
+
         return jsonify({
-            'error': str(e)
+            "error": str(e)
         }), 500
 
 # =========================================================
-# CONVERTER WEBM -> MP4
+# UPLOAD VIDEO
 # =========================================================
 
-@app.route('/converter', methods=['POST'])
-def converter():
+def upload_video(video_path):
 
-    if 'video' not in request.files:
-        return jsonify({
-            'error': 'Arquivo de vídeo não encontrado'
-        }), 400
+    print("⬆️ Criando upload...")
 
-    webm_file = request.files['video']
+    response = requests.post(
+        f"{RUNWAY_API_URL}/uploads",
+        headers=HEADERS,
+        json={
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            "filename":
+                os.path.basename(video_path),
 
-    final_filename = f"libras_{timestamp}.mp4"
+            "numberOfBytes":
+                os.path.getsize(video_path),
 
-    final_path = os.path.join(MEDIA_DIR, final_filename)
+            "type":
+                "ephemeral"
+        }
+    )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    print(response.text)
 
-        input_p = os.path.join(tmpdir, 'input.webm')
+    if response.status_code not in [200, 201]:
 
-        output_p = os.path.join(tmpdir, 'output.mp4')
+        raise Exception(
+            f"Erro upload:\n{response.text}"
+        )
 
-        webm_file.save(input_p)
+    data = response.json()
 
-        command = [
-            'ffmpeg',
-            '-y',
-            '-i', input_p,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart',
-            output_p
-        ]
+    upload_url = data["uploadUrl"]
 
-        try:
+    asset_id = data["id"]
 
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True
+    print("⬆️ Enviando vídeo...")
+
+    with open(video_path, "rb") as f:
+
+        put = requests.put(
+            upload_url,
+            data=f,
+            headers={
+                "Content-Type":
+                    "video/mp4"
+            }
+        )
+
+    print(f"PUT STATUS: {put.status_code}")
+
+    if put.status_code not in [200, 201]:
+
+        raise Exception(
+            f"Erro PUT:\n{put.text}"
+        )
+
+    return asset_id
+
+# =========================================================
+# CREATE TASK
+# =========================================================
+
+def create_task(asset_id):
+
+    print("🎬 Criando task Runway...")
+
+    payload = {
+
+        "model":
+            "gen3a_turbo/video-to-video",
+
+        "input": {
+
+            "videoUri":
+                asset_id,
+
+            "promptText": """
+Transform this sign language avatar into a realistic 3D human.
+
+Keep hand gestures EXACTLY identical.
+
+Preserve timing and synchronization.
+
+Brazilian sign language interpreter.
+
+Natural facial expressions.
+
+Professional cinematic lighting.
+
+Studio quality.
+
+Realistic skin and eyes.
+
+Smooth movements.
+
+Do not crop hands.
+
+Do not change camera angle.
+"""
+        }
+    }
+
+    response = requests.post(
+        f"{RUNWAY_API_URL}/tasks",
+        headers=HEADERS,
+        json=payload
+    )
+
+    print(response.text)
+
+    if response.status_code not in [200, 201]:
+
+        raise Exception(
+            f"Erro task:\n{response.text}"
+        )
+
+    data = response.json()
+
+    return data["id"]
+
+# =========================================================
+# WAIT TASK
+# =========================================================
+
+def wait_task(task_id):
+
+    print("⏳ Esperando geração IA...")
+
+    while True:
+
+        response = requests.get(
+            f"{RUNWAY_API_URL}/tasks/{task_id}",
+            headers=HEADERS
+        )
+
+        if response.status_code != 200:
+
+            raise Exception(
+                f"Erro status:\n{response.text}"
             )
 
-            if result.returncode != 0:
+        data = response.json()
 
-                print(result.stderr)
+        status = data["status"]
 
-                return jsonify({
-                    'error': 'Erro no FFmpeg',
-                    'details': result.stderr
-                }), 500
+        print(f"🎬 STATUS: {status}")
 
-            shutil.copy(output_p, final_path)
+        if status == "SUCCEEDED":
 
-            print(f'✅ Vídeo salvo em: {final_path}')
+            output = data.get("output")
+
+            print(output)
+
+            if isinstance(output, list):
+
+                return output[0]
+
+            if isinstance(output, dict):
+
+                if "video" in output:
+                    return output["video"]
+
+                if "url" in output:
+                    return output["url"]
+
+            raise Exception(
+                f"Output desconhecido:\n{output}"
+            )
+
+        elif status == "FAILED":
+
+            raise Exception(
+                f"Task falhou:\n{data}"
+            )
+
+        time.sleep(5)
+
+# =========================================================
+# DOWNLOAD VIDEO
+# =========================================================
+
+def download_video(url, output_path):
+
+    print("⬇️ Baixando vídeo IA...")
+
+    response = requests.get(
+        url,
+        stream=True
+    )
+
+    with open(output_path, "wb") as f:
+
+        shutil.copyfileobj(
+            response.raw,
+            f
+        )
+
+# =========================================================
+# FFMPEG
+# =========================================================
+
+def optimize_video(input_path, output_path):
+
+    print("⚡ Convertendo MP4...")
+
+    command = [
+
+        "ffmpeg",
+        "-y",
+
+        "-i", input_path,
+
+        "-c:v", "libx264",
+
+        "-preset", "medium",
+
+        "-pix_fmt", "yuv420p",
+
+        "-movflags", "+faststart",
+
+        output_path
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        raise Exception(
+            f"Erro FFmpeg:\n{result.stderr}"
+        )
+
+# =========================================================
+# MELHORAR AVATAR
+# =========================================================
+
+@app.route(
+    '/melhorar-avatar',
+    methods=['POST']
+)
+def melhorar_avatar():
+
+    try:
+
+        if 'video' not in request.files:
+
+            return jsonify({
+                "error":
+                    "Vídeo não enviado"
+            }), 400
+
+        video_file = request.files['video']
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        final_name = (
+            f"avatar_realista_{timestamp}.mp4"
+        )
+
+        final_path = os.path.join(
+            MEDIA_DIR,
+            final_name
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            input_path = os.path.join(
+                tmpdir,
+                "input.mp4"
+            )
+
+            runway_path = os.path.join(
+                tmpdir,
+                "runway.mp4"
+            )
+
+            final_tmp = os.path.join(
+                tmpdir,
+                "final.mp4"
+            )
+
+            # =====================================
+            # SAVE INPUT
+            # =====================================
+
+            video_file.save(input_path)
+
+            print("✅ Vídeo recebido")
+
+            # =====================================
+            # UPLOAD
+            # =====================================
+
+            asset_id = upload_video(
+                input_path
+            )
+
+            print(
+                f"✅ Asset ID: {asset_id}"
+            )
+
+            # =====================================
+            # CREATE TASK
+            # =====================================
+
+            task_id = create_task(
+                asset_id
+            )
+
+            print(
+                f"✅ Task ID: {task_id}"
+            )
+
+            # =====================================
+            # WAIT TASK
+            # =====================================
+
+            output_url = wait_task(
+                task_id
+            )
+
+            print(
+                f"✅ VIDEO URL: {output_url}"
+            )
+
+            # =====================================
+            # DOWNLOAD
+            # =====================================
+
+            download_video(
+                output_url,
+                runway_path
+            )
+
+            # =====================================
+            # FFMPEG
+            # =====================================
+
+            optimize_video(
+                runway_path,
+                final_tmp
+            )
+
+            # =====================================
+            # SAVE FINAL
+            # =====================================
+
+            shutil.copy(
+                final_tmp,
+                final_path
+            )
+
+            print(
+                f"✅ SALVO: {final_path}"
+            )
 
             return send_file(
                 final_path,
                 as_attachment=True,
-                download_name='libras.mp4'
+                download_name=
+                    "avatar_realista.mp4"
             )
 
-        except Exception as e:
+    except Exception as e:
 
-            return jsonify({
-                'error': str(e)
-            }), 500
+        traceback.print_exc()
 
-# =========================================================
-# RECORTAR VIDEO PELO SRT
-# =========================================================
-
-@app.route('/sincronizar', methods=['POST'])
-def sincronizar():
-
-    """
-    Espera:
-    - video => gravação completa do VLibras
-    - srt => arquivo srt
-
-    Retorna:
-    - vídeo sincronizado
-    """
-
-    if 'video' not in request.files:
         return jsonify({
-            'error': 'Vídeo não enviado'
-        }), 400
-
-    if 'srt' not in request.files:
-        return jsonify({
-            'error': 'SRT não enviado'
-        }), 400
-
-    video_file = request.files['video']
-    srt_file = request.files['srt']
-
-    srt_text = srt_file.read().decode('utf-8')
-
-    entries = parse_srt(srt_text)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    final_filename = f'sincronizado_{timestamp}.mp4'
-
-    final_path = os.path.join(MEDIA_DIR, final_filename)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-
-        input_video = os.path.join(tmpdir, 'input.webm')
-
-        converted_video = os.path.join(tmpdir, 'converted.mp4')
-
-        concat_file = os.path.join(tmpdir, 'concat.txt')
-
-        video_file.save(input_video)
-
-        # =====================================================
-        # CONVERTE WEBM PARA MP4
-        # =====================================================
-
-        convert_command = [
-            'ffmpeg',
-            '-y',
-            '-i', input_video,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-pix_fmt', 'yuv420p',
-            converted_video
-        ]
-
-        result = subprocess.run(
-            convert_command,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-
-            return jsonify({
-                'error': result.stderr
-            }), 500
-
-        segment_paths = []
-
-        # =====================================================
-        # CRIA SEGMENTOS BASEADOS NO SRT
-        # =====================================================
-
-        for idx, entry in enumerate(entries):
-
-            start = entry['start_seconds']
-            duration = entry['duration']
-
-            segment_path = os.path.join(
-                tmpdir,
-                f'segment_{idx}.mp4'
-            )
-
-            segment_command = [
-                'ffmpeg',
-                '-y',
-                '-ss', str(start),
-                '-i', converted_video,
-                '-t', str(duration),
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-pix_fmt', 'yuv420p',
-                '-an',
-                segment_path
-            ]
-
-            result = subprocess.run(
-                segment_command,
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-
-                print(result.stderr)
-
-                continue
-
-            segment_paths.append(segment_path)
-
-        # =====================================================
-        # CONCATENA TODOS OS SEGMENTOS
-        # =====================================================
-
-        with open(concat_file, 'w', encoding='utf-8') as f:
-
-            for path in segment_paths:
-                f.write(f"file '{path}'\n")
-
-        concat_command = [
-            'ffmpeg',
-            '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', concat_file,
-            '-c', 'copy',
-            final_path
-        ]
-
-        result = subprocess.run(
-            concat_command,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-
-            return jsonify({
-                'error': result.stderr
-            }), 500
-
-        print(f'✅ Vídeo sincronizado salvo em: {final_path}')
-
-        return send_file(
-            final_path,
-            as_attachment=True,
-            download_name='video_sincronizado.mp4'
-        )
+            "error": str(e)
+        }), 500
 
 # =========================================================
-# HEALTH CHECK
+# HEALTH
 # =========================================================
 
 @app.route('/')
 def home():
+
     return jsonify({
-        'status': 'online'
+        "status": "online"
     })
 
 # =========================================================
@@ -388,5 +589,5 @@ if __name__ == '__main__':
     app.run(
         host='0.0.0.0',
         port=5000,
-        debug=True
+        debug=False
     )

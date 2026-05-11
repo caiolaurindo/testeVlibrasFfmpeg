@@ -3,141 +3,444 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>Conversor Libras - Grupo 3</title>
+    <title>Conversor Libras IA</title>
+
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #eee; }
-        .panel { background: white; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
-        .recording { color: red; animation: blink 1s infinite; }
-        @keyframes blink { 50% { opacity: 0; } }
-        #status { font-size: 0.9em; color: #666; margin-top: 5px; }
+        body {
+            font-family: Arial, sans-serif;
+            background: #f2f2f2;
+            padding: 20px;
+        }
+
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 700px;
+        }
+
+        button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #2563eb;
+            color: white;
+            margin-right: 10px;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        #status {
+            margin-top: 15px;
+            color: #444;
+            font-size: 14px;
+        }
+
+        .recording {
+            background: red !important;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        #dl {
+            display: none;
+            margin-top: 20px;
+            display: inline-block;
+            font-weight: bold;
+            color: green;
+            text-decoration: none;
+        }
     </style>
 </head>
 
 <body>
+
     <div class="panel">
+
+        <h2>🎬 Conversor SRT → Libras IA</h2>
+
         <input type="file" id="fileInput" accept=".srt">
-        <button onclick="carregar()">📁 Carregar SRT</button>
-        <button id="btnRec" onclick="iniciarProcesso()">⏺ Gerar e Gravar</button>
-        <a id="dl" style="display:none; margin-top: 10px; font-weight: bold; color: green;">⬇ Baixar Vídeo MP4</a>
-        <div id="status">Aguardando arquivo...</div>
+
+        <br><br>
+
+        <button onclick="carregarSRT()">
+            📁 Carregar SRT
+        </button>
+
+        <button id="btnRec" onclick="iniciarProcesso()">
+            ⏺ Gerar Vídeo
+        </button>
+
+        <br>
+
+        <a id="dl" download="avatar_realista.mp4">
+            ⬇ Baixar MP4
+        </a>
+
+        <div id="status">
+            Aguardando arquivo...
+        </div>
+
     </div>
 
+    <!-- VLibras -->
     <div vw class="enabled">
         <div vw-access-button class="active"></div>
+
         <div vw-plugin-wrapper>
             <div class="vw-plugin-top-wrapper"></div>
         </div>
     </div>
 
     <script src="https://vlibras.gov.br/app/vlibras-plugin.js"></script>
+
     <script>
-        new window.VLibras.Widget('https://vlibras.gov.br/app');
-        
-        let glossas = []; 
-        let rec; 
+
+        new window.VLibras.Widget(
+            'https://vlibras.gov.br/app'
+        );
+
+        let glossas = [];
+        let recorder;
         let chunks = [];
-        let playTimeouts = [];
+        let timeouts = [];
 
-        // Converte o formato SRT (00:00:00,000) para milissegundos
-        function srtToMs(srtTime) {
-            const [time, ms] = srtTime.replace(',', '.').split('.');
-            const [h, m, s] = time.split(':');
-            return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000 + (parseInt(ms) || 0);
+        // =====================================================
+        // SRT → MS
+        // =====================================================
+
+        function srtToMs(time) {
+
+            const [main, ms] = time.split(',');
+
+            const [h, m, s] = main.split(':');
+
+            return (
+                parseInt(h) * 3600000 +
+                parseInt(m) * 60000 +
+                parseInt(s) * 1000 +
+                parseInt(ms)
+            );
         }
 
-        async function carregar() {
-            const fileInput = document.getElementById('fileInput');
-            if (!fileInput.files[0]) return alert("Selecione um arquivo SRT primeiro.");
-            
-            const text = await fileInput.files[0].text();
-            document.getElementById('status').innerText = "Processando glossas...";
-            
-            try {
-                const res = await fetch('http://localhost:5000/processar', { method: 'POST', body: text });
-                glossas = await res.json();
-                document.getElementById('status').innerText = "Legendas carregadas e prontas!";
-            } catch (e) {
-                document.getElementById('status').innerText = "Erro ao conectar com o servidor Python.";
-            }
+        // =====================================================
+        // STATUS
+        // =====================================================
+
+        function setStatus(text) {
+
+            document.getElementById(
+                'status'
+            ).innerText = text;
         }
 
-        // Garante que o player está pronto e sinaliza no tempo certo
-        function playSincronizado() {
-            if (!window.plugin || !window.plugin.player || typeof window.plugin.player.translate !== 'function') {
-                document.getElementById('status').innerText = "Aguardando inicialização do avatar...";
-                setTimeout(playSincronizado, 1000);
+        // =====================================================
+        // LOAD SRT
+        // =====================================================
+
+        async function carregarSRT() {
+
+            const file =
+                document.getElementById(
+                    'fileInput'
+                ).files[0];
+
+            if (!file) {
+
+                alert("Selecione um SRT.");
+
                 return;
             }
 
-            document.getElementById('status').innerText = "Sinalizando e gravando...";
-            const startTime = Date.now();
+            const text = await file.text();
 
-            glossas.forEach((item) => {
-                const delay = srtToMs(item.start);
-                const timeout = setTimeout(() => {
-                    if (rec && rec.state === "recording") {
-                        window.plugin.player.translate(item.glossa);
+            setStatus("📄 Processando SRT...");
+
+            try {
+
+                const response = await fetch(
+                    'http://localhost:5000/processar',
+                    {
+                        method: 'POST',
+                        body: text
                     }
-                }, delay);
-                playTimeouts.push(timeout);
-            });
+                );
 
-            // Calcula o fim da gravação baseado no último timestamp
-            const totalDuration = srtToMs(glossas[glossas.length - 1].end) + 2000;
-            setTimeout(pararGravacao, totalDuration);
+                glossas = await response.json();
+
+                console.log(glossas);
+
+                setStatus(
+                    `✅ ${glossas.length} legendas carregadas`
+                );
+
+            } catch (err) {
+
+                console.error(err);
+
+                setStatus(
+                    "❌ Erro ao conectar no backend"
+                );
+            }
         }
 
-        function iniciarProcesso() {
-            if (glossas.length === 0) return alert("Carregue o SRT antes de gerar.");
-            
-            const canvas = document.querySelector('canvas');
-            if (!canvas) return alert("O avatar ainda não carregou. Aguarde o boneco aparecer na tela.");
+        // =====================================================
+        // ESPERA VLibras
+        // =====================================================
 
-            // Limpa estados anteriores
+        function esperarVLibras() {
+
+            return new Promise((resolve) => {
+
+                const interval = setInterval(() => {
+
+                    if (
+                        window.plugin &&
+                        window.plugin.player &&
+                        typeof window.plugin.player.translate === 'function'
+                    ) {
+
+                        clearInterval(interval);
+
+                        resolve();
+                    }
+
+                }, 1000);
+
+            });
+        }
+
+        // =====================================================
+        // PLAY SINCRONIZADO
+        // =====================================================
+
+        async function playSincronizado() {
+
+            await esperarVLibras();
+
+            setStatus(
+                "🤟 Avatar sinalizando..."
+            );
+
+            glossas.forEach(item => {
+
+                const delay = srtToMs(
+                    item.start
+                );
+
+                const timeout = setTimeout(() => {
+
+                    if (
+                        recorder &&
+                        recorder.state === "recording"
+                    ) {
+
+                        console.log(
+                            "▶",
+                            item.glossa
+                        );
+
+                        window.plugin.player.translate(
+                            item.glossa
+                        );
+                    }
+
+                }, delay);
+
+                timeouts.push(timeout);
+            });
+
+            // Finaliza baseado no último timestamp
+
+            const ultimo =
+                glossas[glossas.length - 1];
+
+            const total =
+                srtToMs(ultimo.end) + 3000;
+
+            setTimeout(() => {
+
+                pararGravacao();
+
+            }, total);
+        }
+
+        // =====================================================
+        // INICIAR PROCESSO
+        // =====================================================
+
+        async function iniciarProcesso() {
+
+            if (glossas.length === 0) {
+
+                alert("Carregue o SRT.");
+
+                return;
+            }
+
+            const canvas =
+                document.querySelector('canvas');
+
+            if (!canvas) {
+
+                alert(
+                    "VLibras ainda carregando."
+                );
+
+                return;
+            }
+
             chunks = [];
-            playTimeouts.forEach(clearTimeout);
-            playTimeouts = [];
 
-            // Inicia captura do Canvas
-            const stream = canvas.captureStream(30);
-            rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
-            
-            rec.ondataavailable = e => chunks.push(e.data);
-            rec.onstop = enviarParaConversao;
+            timeouts.forEach(clearTimeout);
 
-            rec.start();
-            document.getElementById('btnRec').classList.add('recording');
-            document.getElementById('dl').style.display = 'none';
-            
+            timeouts = [];
+
+            // =========================================
+            // CAPTURA
+            // =========================================
+
+            const stream =
+                canvas.captureStream(30);
+
+            recorder = new MediaRecorder(
+                stream,
+                {
+                    mimeType: 'video/webm'
+                }
+            );
+
+            recorder.ondataavailable = e => {
+
+                if (e.data.size > 0) {
+
+                    chunks.push(e.data);
+                }
+            };
+
+            recorder.onstop = enviarParaIA;
+
+            recorder.start();
+
+            document
+                .getElementById('btnRec')
+                .classList.add('recording');
+
+            setStatus(
+                "🎥 Gravando avatar..."
+            );
+
             playSincronizado();
         }
 
+        // =====================================================
+        // STOP
+        // =====================================================
+
         function pararGravacao() {
-            if (rec && rec.state === "recording") {
-                rec.stop();
-                document.getElementById('btnRec').classList.remove('recording');
-                document.getElementById('status').innerText = "Gravado! Convertendo para MP4...";
+
+            if (
+                recorder &&
+                recorder.state === "recording"
+            ) {
+
+                recorder.stop();
+
+                document
+                    .getElementById('btnRec')
+                    .classList.remove('recording');
+
+                setStatus(
+                    "⚡ Enviando para IA..."
+                );
             }
         }
 
-        async function enviarParaConversao() {
-            const blob = new Blob(chunks, { type: 'video/webm' });
-            const fd = new FormData();
-            fd.append('video', blob);
+        // =====================================================
+        // ENVIA RUNWAY
+        // =====================================================
+
+        async function enviarParaIA() {
 
             try {
-                const res = await fetch('http://localhost:5000/converter', { method: 'POST', body: fd });
-                if (!res.ok) throw new Error("Falha na conversão");
-                
-                const mp4 = await res.blob();
-                const a = document.getElementById('dl');
-                a.href = URL.createObjectURL(mp4);
-                a.style.display = 'block';
-                document.getElementById('status').innerText = "Conversão concluída!";
-            } catch (e) {
-                document.getElementById('status').innerText = "Erro na conversão. Verifique se o FFmpeg está instalado.";
+
+                const blob = new Blob(
+                    chunks,
+                    {
+                        type: 'video/webm'
+                    }
+                );
+
+                const formData =
+                    new FormData();
+
+                formData.append(
+                    'video',
+                    blob,
+                    'avatar.webm'
+                );
+
+                // =====================================
+                // NOVA ROTA
+                // =====================================
+
+                const response = await fetch(
+                    'http://localhost:5000/melhorar-avatar',
+                    {
+                        method: 'POST',
+                        body: formData
+                    }
+                );
+
+                if (!response.ok) {
+
+                    const err =
+                        await response.text();
+
+                    throw new Error(err);
+                }
+
+                setStatus(
+                    "⬇ Baixando vídeo final..."
+                );
+
+                const mp4 =
+                    await response.blob();
+
+                const url =
+                    URL.createObjectURL(mp4);
+
+                const dl =
+                    document.getElementById('dl');
+
+                dl.href = url;
+
+                dl.style.display = 'inline-block';
+
+                setStatus(
+                    "✅ Vídeo finalizado!"
+                );
+
+            } catch (err) {
+
+                console.error(err);
+
+                setStatus(
+                    "❌ Erro ao gerar vídeo IA"
+                );
             }
         }
+
     </script>
+
 </body>
+
 </html>
